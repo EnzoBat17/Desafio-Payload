@@ -34,10 +34,18 @@
 
 #define TEMPO_RESTART_BME 500
 
+//I2C
+#define SDA_PIN 21
+#define SCL_PIN 22
+
 // SPI
 #define SCK_PIN  18
 #define MISO_PIN 19
 #define MOSI_PIN 23
+
+//UART
+#define RX_PIN 16
+#define TX_PIN 17
 
 // LoRa
 #define LORA_CS   5
@@ -46,8 +54,6 @@
 
 // SD
 #define SD_CS 4
-
-//GP
 
 // ====================== STATUS FLAGS ======================
 #define STATUS_BME      0x01
@@ -198,7 +204,7 @@ void reconnect_bme(){
 // ======================================================
 
 void init_gps() {
-  GPS.begin(9600, SERIAL_8N1, 16, 17); // RX, TX.
+  GPS.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN); // RX, TX.
 }
 
 void update_gps() {
@@ -373,7 +379,7 @@ void setup() {
   digitalWrite(LORA_CS, HIGH);
   digitalWrite(SD_CS, HIGH);
 
-  Wire.begin(21, 22); //SDA, SCL
+  Wire.begin(SDA_PIN, SCL_PIN); //SDA, SCL
   Wire.setTimeOut(TIME_OUT_I2C); //Caso um sensor I2C pare de responder o ESP espera X ms, senão aborta a comunicação e libera o barramento pros outros (previne que um sensor com defeito bloqueie o barramento)
 
   init_bme();
