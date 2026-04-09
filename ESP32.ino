@@ -56,37 +56,41 @@
 #define SD_CS 4
 
 // ====================== STATUS FLAGS ======================
+//Armazena o status de todos sensores em 1 byte
 #define STATUS_BME      0x01
 #define STATUS_GPS      0x02
 #define STATUS_GPS_WEAK 0x04
 #define STATUS_LORA     0x08
 
+//Ex: 00000111 -> BME OK, GPS OK com sinal fraco, LoRa OFF
+
 // ====================== STRUCT PRINCIPAL ======================
 struct st_packet {
-  uint32_t timestamp;
-  uint8_t status;
+  uint32_t timestamp; //4 bytes
+  uint8_t status; //1 byte
 
   // BME
-  float temp;
-  float pressure;
-  float alt;
-  float hum;
+  float temp; //4 bytes
+  float pressure; //4 bytes
+  float alt;//4 bytes
+  float hum;//4 bytes
 
   // GPS
-  float lat;
-  float lon;
-  float gps_alt;
-  uint8_t sats;
+  float lat;//4 bytes
+  float lon;//4 bytes
+  float gps_alt;//4 bytes
+  uint8_t sats;//1 byte
 
   // LoRa
-  int16_t rssi;
-  float snr;
-};
+  int16_t rssi; //2 bytes
+  float snr;//4 bytes
+};//~40bytes (sem considerar o padding)
+//PARA SABER O VALOR EXATO RECOMENDA-SE TESTAR COM O MICRO-CONTROLADOR LIGADO Serial.println(sizeof(st_packet))
 
 // ====================== OBJETOS ======================
 Adafruit_BME280 bme;
 File sd_file;
-HardwareSerial GPS(2); // UART2
+HardwareSerial GPS(2); // Inicia a UART2
 TinyGPSPlus gps;
 
 // ====================== VARIÁVEIS GLOBAIS ======================
@@ -174,7 +178,7 @@ bool ler_bme() {
   }
 
   else{
-    if(n_reconnect_bme > 5){
+    if(n_reconnect_bme > 10){ //Se em 10 tentativas não conseguir reconectar desiste do sensor
       current_data.temp = ERROR_VALUE;
       current_data.pressure = ERROR_VALUE;
       current_data.alt = ERROR_VALUE;
@@ -245,7 +249,7 @@ void ler_gps(){
 void init_lora() {
   LoRa.setPins(LORA_CS, LORA_RST, LORA_IRQ);
 
-  if (LoRa.begin(915E6)) {
+  if (LoRa.begin(915E6)) { //902 - 928 Mhz
     status_lora = true;
     Serial.println("Lora Inicializado");
 
@@ -260,6 +264,7 @@ void init_lora() {
 
 void lora_add_buffer() {
   if (lora_count < LORA_BUFFER_SIZE) {
+    //O buffer reseta após o LoRa enviar. Provavelmente não deixaremos de registrar dados, pois se o LoRa travar o watchdog já vai reiniciar o sistema
     lora_buffer[lora_count++] = current_data;
   }
 }
@@ -270,7 +275,8 @@ bool send_lora() {
   st_packet pkt = {0};
   pkt.timestamp = now;
 
-  // média BME
+  //Média BME
+  //Como o sample rate do BME é muito mais alto usaremos a média dos valores dele
   for (int i = 0; i < lora_count; i++) {
     pkt.temp += lora_buffer[i].temp;
     pkt.pressure += lora_buffer[i].pressure;
@@ -282,6 +288,7 @@ bool send_lora() {
   pkt.pressure /= lora_count;
   pkt.alt /= lora_count;
   pkt.hum /= lora_count;
+  //Tratar situações onde a desconexão de um sensor altera a média exigiria muito esforço (no mínimo O(n)), pior do que só aceitar perder 2 ou 3 medições
 
   // GPS (último valor)
   pkt.lat = current_data.lat;
@@ -289,15 +296,19 @@ bool send_lora() {
   pkt.gps_alt = current_data.gps_alt;
   pkt.sats = current_data.sats;
 
+  //Lora
   pkt.rssi = LoRa.packetRssi();
   pkt.snr = LoRa.packetSnr();
 
+  //Status
   pkt.status = current_data.status | STATUS_LORA; //Copia o status de current data para pkt
 
   //Envia os dados
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&pkt, sizeof(pkt));
   uint8_t completion_flag = LoRa.endPacket(); //Retorna 1 quando termina
+
+  //No receptor fazer: LoRa.readBytes((uint8_t*)&pkt, sizeof(pkt));
   lora_count = 0;
   if(!completion_flag) current_data.status &= ~STATUS_LORA;
   return (completion_flag == 1);
@@ -361,6 +372,9 @@ void sd_flush() {
 // ====================== SETUP ==========================
 // ======================================================
 void setup() {
+  //Monitor Serial
+  //IMPORTANTE!!!! O monitor serial não deve ser usado durante a missão. Os usos de Serial.print devem ser mantidos apenas para testes de bancada e debug durante o desenvolvimento
+  //Durante a missão as logs de sistema serão salvas no cartão SD e enviadas por telemetria junto doos dados
   Serial.begin(115200);
 
   //Watchdog
