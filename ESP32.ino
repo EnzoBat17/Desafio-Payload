@@ -1,5 +1,6 @@
 //ATENÇÃO!!
 //A distribuição de tarefas no sistema (scheduler) será feita de forma simplificada usando millis() devido ao tempo curto de desenvolvimento. O ideal seria usar o FreeRTOS disponível no ESP
+//Como RTOS não está sendo utilizado, o task watchdog não está disponível, apenas o interrupt watchdog
 //Pela possibilidade de trabalhar de maneira "paralela" evite funções que retornam valores e opte por usar variáveis globais
 
 //Eletronicos x Protocolos
@@ -15,16 +16,23 @@
 #include <LoRa.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
+#include <TinyGPSPlus.h>
+#include "esp_task_wdt.h"
+
 
 // ====================== DEFINES ======================
 #define Sea_Level_Pressure_HPA 1013.25
 
 #define SAMPLE_RATE_BME   100     // 10 Hz  Pela seção 9.2 do datasheet o sample rate maximo suportado seria de 62,5Hz (considerou-se measurement time de 16ms)
-#define SAMPLE_RATE_GPS   200     // 5 Hz
+#define SAMPLE_RATE_GPS   500     // 2 Hz
 #define SAMPLE_RATE_LORA  1000    // 1 Hz
 #define SD_TIMEOUT        3000    // flush SD
 
 #define TIME_OUT_I2C 50 // Usamos 3x nosso MAIOR measurement time (estamos considerando 16ms)
+
+#define ERROR_VALUE NAN
+
+#define TEMPO_RESTART_BME 500
 
 // SPI
 #define SCK_PIN  18
@@ -39,10 +47,13 @@
 // SD
 #define SD_CS 4
 
+//GP
+
 // ====================== STATUS FLAGS ======================
-#define STATUS_BME   0x01
-#define STATUS_GPS   0x02
-#define STATUS_LORA  0x04
+#define STATUS_BME      0x01
+#define STATUS_GPS      0x02
+#define STATUS_GPS_WEAK 0x04
+#define STATUS_LORA     0x08
 
 // ====================== STRUCT PRINCIPAL ======================
 struct st_packet {
@@ -69,10 +80,13 @@ struct st_packet {
 // ====================== OBJETOS ======================
 Adafruit_BME280 bme;
 File sd_file;
+HardwareSerial GPS(2); // UART2
+TinyGPSPlus gps;
 
 // ====================== VARIÁVEIS GLOBAIS ======================
-st_packet current_data;
+st_packet current_data = {0};
 
+uint8_t n_reconnect_bme = 0;
 unsigned long now = 0;
 unsigned long last_bme = 0;
 unsigned long last_gps = 0;
@@ -102,70 +116,127 @@ void init_bme() {
   if (bme.begin(0x76)){ //I2C esta 0x76 se SDO ligar em GND
     status_bme = true;
     Serial.println("BME Conectado no endereco 0x76");
-  }
-  else if (bme.begin(0x77)){ //I2C esta 0x77 se SDO ligar em VDDIO
-    status_bme = true;
-    Serial.println("BME Conectado no endereco 0x77");
-  }
-  else {
-    Serial.println("BME280 não encontrado!");
-    status_bme = false;
-  }
 
-  bme.setSampling(
+    bme.setSampling(
                   Adafruit_BME280::MODE_FORCED, //Operaremos a BME no modo "Forced", assim quem define o gatilho da leitura é o scheduler
                   Adafruit_BME280::SAMPLING_X1, // temp
                   Adafruit_BME280::SAMPLING_X4, // pressão - 4x para uma maior precisão em altitude, pois não será usada IMU
                   Adafruit_BME280::SAMPLING_X1, // umidade
                   Adafruit_BME280::FILTER_X4 //Filtro de ruído - Com testes de bancada pode ser aumentando para X8 ou X16 caso o impacto na velocidade do firmware seja baixo
                 );
+  }
+  else if (bme.begin(0x77)){ //I2C esta 0x77 se SDO ligar em VDDIO
+    status_bme = true;
+    Serial.println("BME Conectado no endereco 0x77");
+    bme.setSampling(
+                  Adafruit_BME280::MODE_FORCED, //Operaremos a BME no modo "Forced", assim quem define o gatilho da leitura é o scheduler
+                  Adafruit_BME280::SAMPLING_X1, // temp
+                  Adafruit_BME280::SAMPLING_X4, // pressão - 4x para uma maior precisão em altitude, pois não será usada IMU
+                  Adafruit_BME280::SAMPLING_X1, // umidade
+                  Adafruit_BME280::FILTER_X4 //Filtro de ruído - Com testes de bancada pode ser aumentando para X8 ou X16 caso o impacto na velocidade do firmware seja baixo
+                );
+  }
+  else {
+    Serial.println("BME280 não encontrado!");
+    status_bme = false;
+  }
 //OBS: Checar seção 3.5.3 para configs recomndadas para INDOOR NAVIGATION (extrema precisão em altitude). Se for possível tentar aproximar as configs para as dessa seção
 //Pela fórmula 9.1 do apêndice B o tempo máximo de measurement é ~16ms e o médio de ~15ms
 }
 
 bool ler_bme() {
-  if (!status_bme) return false;
+  if (status_bme){
 
-  if (bme.takeForcedMeasurement()) {
-    current_data.temp = bme.readTemperature();
-    current_data.pressure = bme.readPressure() / 100.0;
-    current_data.alt = bme.readAltitude(Sea_Level_Pressure_HPA);
-    current_data.hum = bme.readHumidity();
+    if (bme.takeForcedMeasurement()) {
+      current_data.temp = bme.readTemperature();
+      current_data.pressure = bme.readPressure() / 100.0;
+      current_data.alt = bme.readAltitude(Sea_Level_Pressure_HPA);
+      current_data.hum = bme.readHumidity();
+      current_data.status |= STATUS_BME; //Muda o último bit de STATUS_BME para 1
+      return true;
+    }
 
-    current_data.status |= STATUS_BME; //Muda o último bit de STATUS_BME para 1
-    return true;
+    else{ //Se dar erro no takeForcedMeasurement
+      current_data.temp = ERROR_VALUE;
+      current_data.pressure = ERROR_VALUE;
+      current_data.alt = ERROR_VALUE;
+      current_data.hum = ERROR_VALUE;
+      current_data.status &= ~STATUS_BME; //Muda o último bit de STATUS_BME para 0
+      status_bme = false;
+      return false;
+    }
   }
 
-  current_data.status &= ~STATUS_BME; //Muda o último bit de STATUS_BME para 0
-  return false;
+  else{
+    if(n_reconnect_bme > 5){
+      current_data.temp = ERROR_VALUE;
+      current_data.pressure = ERROR_VALUE;
+      current_data.alt = ERROR_VALUE;
+      current_data.hum = ERROR_VALUE;
+      current_data.status &= ~STATUS_BME; //Muda o último bit de STATUS_BME para 0
+      status_bme = false;
+      return false;
+    }
+
+    else{
+      reconnect_bme();
+      return false;
+    }
+  }
+}
+
+void reconnect_bme(){
+  Serial.println("Tentando reconectar BME280...");
+  if(millis() - last_bme >= TEMPO_RESTART_BME){
+    init_bme();
+    last_bme = millis();
+  }
 }
 
 // ======================================================
 // ====================== GPS ============================
 // ======================================================
-bool ler_gps() {
-  bool fix = false;
 
-  if (fix) {
-    current_data.lat = 0;
-    current_data.lon = 0;
-    current_data.gps_alt = 0;
-    current_data.sats = 0;
+void init_gps() {
+  GPS.begin(9600, SERIAL_8N1, 16, 17); // RX, TX.
+}
 
-    current_data.status |= STATUS_GPS;
-    return true;
+void update_gps() {
+  uint8_t n = 0;
+  while (GPS.available() && n < 70) { //70 bytes por leitura (ESSE VALOR É ARBITRÁRIO E DEVE SER TESTADO!)
+    gps.encode(GPS.read());
+    n++;
   }
+}
 
-  current_data.status &= ~STATUS_GPS;
-  return false;
+void ler_gps(){
+  uint8_t n_sat_connect = gps.satellites.value();
+  if (n_sat_connect >= 1) {
+    current_data.lat = gps.location.lat();
+    current_data.lon = gps.location.lng();
+    current_data.gps_alt = gps.altitude.meters();
+    current_data.sats = n_sat_connect;
+
+    current_data.status &= ~STATUS_GPS_WEAK;
+    current_data.status |= STATUS_GPS;
+
+    if (n_sat_connect < 5){
+      current_data.status |= STATUS_GPS_WEAK;
+    }
+  } 
+  else {
+    current_data.lat = ERROR_VALUE;
+    current_data.lon = ERROR_VALUE;
+    current_data.gps_alt = ERROR_VALUE;
+    current_data.sats = 0;
+    current_data.status &= ~STATUS_GPS;
+  }
 }
 
 // ======================================================
 // ====================== LORA ===========================
 // ======================================================
 void init_lora() {
-  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, LORA_CS);
-
   LoRa.setPins(LORA_CS, LORA_RST, LORA_IRQ);
 
   if (LoRa.begin(915E6)) {
@@ -217,12 +288,13 @@ bool send_lora() {
 
   pkt.status = current_data.status | STATUS_LORA; //Copia o status de current data para pkt
 
+  //Envia os dados
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&pkt, sizeof(pkt));
-  LoRa.endPacket();
-
+  uint8_t completion_flag = LoRa.endPacket(); //Retorna 1 quando termina
   lora_count = 0;
-  return true;
+  if(!completion_flag) current_data.status &= ~STATUS_LORA;
+  return (completion_flag == 1);
 }
 
 // ======================================================
@@ -285,10 +357,27 @@ void sd_flush() {
 void setup() {
   Serial.begin(115200);
 
+  //Watchdog
+  esp_task_wdt_config_t config = {
+    .timeout_ms = 3000,      // 3 segundos
+    .idle_core_mask = (1 << portNUM_PROCESSORS) - 1, // todos os cores (os cores específicos são passados por bitmask)
+    .trigger_panic = true    // resetar ao travar
+  };
+
+  esp_task_wdt_init(&config);
+  esp_task_wdt_add(NULL); // adiciona a task atual (no nosso caso o loop())
+
+  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN);
+  pinMode(LORA_CS, OUTPUT);
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(LORA_CS, HIGH);
+  digitalWrite(SD_CS, HIGH);
+
   Wire.begin(21, 22); //SDA, SCL
   Wire.setTimeOut(TIME_OUT_I2C); //Caso um sensor I2C pare de responder o ESP espera X ms, senão aborta a comunicação e libera o barramento pros outros (previne que um sensor com defeito bloqueie o barramento)
 
   init_bme();
+  init_gps();
   init_lora();
   sd_init();
 }
@@ -303,16 +392,20 @@ void loop() {
 
   // ===== BME =====
   if (now - last_bme >= SAMPLE_RATE_BME) {
-    ler_bme();
+    if (ler_bme()) {
+      data_was_collected = true;
+    }
     last_bme = now;
-    data_was_collected = true;
   }
 
   // ===== GPS =====
+  update_gps(); //Se os dados do GPS estiverem com erro, pode ser um overflow do buffer - Colocar um sample_rate para update_gps. Se o primeiro buffer estiver vazio ou os dados forem antigos - Aumentar n em update_gps()
+
   if (now - last_gps >= SAMPLE_RATE_GPS) {
     ler_gps();
     last_gps = now;
   }
+
 
   // ===== BUFFER =====
   if (data_was_collected) { //O sample rate mais alto é o do BME. Só adicionamos no buffer algo quando adicionamos algo no BME, assim evitamos dados repetidos
@@ -325,7 +418,7 @@ void loop() {
     sd_flush();
     last_sd_flush = now;
   }
-}
+
 
   // ===== LORA =====
   if (now - last_lora >= SAMPLE_RATE_LORA) {
@@ -333,3 +426,5 @@ void loop() {
     last_lora = now;
   }
 
+  esp_task_wdt_reset(); //Reseta o timer de watchdog
+}
