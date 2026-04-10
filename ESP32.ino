@@ -126,7 +126,7 @@ void init_bme() {
   if (bme.begin(0x76)){ //I2C esta 0x76 se SDO ligar em GND
     status_bme = true;
     Serial.println("BME Conectado no endereco 0x76");
-
+    n_reconnect_bme = 0;
     bme.setSampling(
                   Adafruit_BME280::MODE_FORCED, //Operaremos a BME no modo "Forced", assim quem define o gatilho da leitura é o scheduler
                   Adafruit_BME280::SAMPLING_X1, // temp
@@ -138,6 +138,7 @@ void init_bme() {
   else if (bme.begin(0x77)){ //I2C esta 0x77 se SDO ligar em VDDIO
     status_bme = true;
     Serial.println("BME Conectado no endereco 0x77");
+    n_reconnect_bme = 0;
     bme.setSampling(
                   Adafruit_BME280::MODE_FORCED, //Operaremos a BME no modo "Forced", assim quem define o gatilho da leitura é o scheduler
                   Adafruit_BME280::SAMPLING_X1, // temp
