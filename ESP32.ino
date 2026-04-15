@@ -18,7 +18,8 @@
 #include <Adafruit_BME280.h>
 #include <TinyGPSPlus.h>
 #include "esp_task_wdt.h"
-
+#include <WiFi.h>
+#include "esp_bt.h"
 
 // ====================== DEFINES ======================
 #define Sea_Level_Pressure_HPA 1013.25
@@ -180,6 +181,7 @@ bool ler_bme() {
 
   else{
     if(n_reconnect_bme > 10){ //Se em 10 tentativas não conseguir reconectar desiste do sensor
+
       current_data.temp = ERROR_VALUE;
       current_data.pressure = ERROR_VALUE;
       current_data.alt = ERROR_VALUE;
@@ -373,11 +375,19 @@ void sd_flush() {
 // ====================== SETUP ==========================
 // ======================================================
 void setup() {
+  //Configurações do ESP32
+  setCpuFrequencyMhz(80);
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  esp_bt_controller_disable();
+  esp_bt_controller_deinit();
+  
   //Monitor Serial
   //IMPORTANTE!!!! O monitor serial não deve ser usado durante a missão. Os usos de Serial.print devem ser mantidos apenas para testes de bancada e debug durante o desenvolvimento
   //Durante a missão as logs de sistema serão salvas no cartão SD e enviadas por telemetria junto doos dados
   Serial.begin(115200);
 
+  
   //Watchdog
   esp_task_wdt_config_t config = {
     .timeout_ms = 3000,      // 3 segundos
