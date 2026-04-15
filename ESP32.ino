@@ -7,6 +7,7 @@
 //BME - I2C
 //GPS - UART/I2C
 //LoRa - SPI (prioridade de SPI é dele)
+//CartãoSD - SPI
 
 // ====================== INCLUDES ======================
 #include <stdio.h>
